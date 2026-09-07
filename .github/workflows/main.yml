@@ -1,0 +1,88 @@
+name: Build Kernel (4.9 - crDroid)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 6"
+  push:
+    branches:
+      - HEAD
+  pull_request:
+    branches:
+      - HEAD
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "vendor/alioth_defconfig"
+      KERNEL_CMDLINE: "ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- O=out"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: "true"
+          fetch-depth: 100
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+
+      - name: Install dependencies & toolchain
+        run: |
+          sudo apt-get update -y
+
+          # Toolchain & build deps
+          sudo apt install -y \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            aria2 binutils make python3 libssl-dev build-essential \
+            bc bison flex unzip ca-certificates xz-utils \
+            mkbootimg cpio device-tree-compiler git git-lfs curl wget
+
+          # Toolchain (Android Clang r574158)
+          mkdir -p google-clang
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/603a89415bbb04dff8bc577b95534479ec13fdc5/clang-r574158.tar.gz" | tar -xz -C google-clang
+
+      - name: GetTime
+        id: get_time
+        run: echo "TIME=$(TZ=UTC+3 date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Kernel-With-KernelSU (with logging)
+        run: |
+          export PATH="$(pwd)/google-clang/bin:$PATH"
+          export LD=ld.lld
+
+          echo ">>> Starting defconfig build..."
+          make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang" 2>&1 | tee build_defconfig.log
+
+          echo ">>> Starting kernel compilation (Image only)..."
+          make $KERNEL_CMDLINE CC="ccache clang" -j"$(nproc --all)" Image 2>&1 | tee build_kernel.log
+
+          BUILD_RESULT=${PIPESTATUS[0]}
+          if [ "$BUILD_RESULT" -ne 0 ]; then
+            echo "❌ Kernel build failed. Logs will be uploaded."
+            exit 1
+          fi
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build_Logs-${{ steps.get_time.outputs.TIME }}
+          path: |
+            build_defconfig.log
+            build_kernel.log
+            patch.log
+            out/arch/arm64/boot/.config
+
+      - name: Upload Raw Outputs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Raw_Kernel-${{ steps.get_time.outputs.TIME }}
+          path: |
+            out/arch/arm64/boot/Image
